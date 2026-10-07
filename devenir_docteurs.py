@@ -20,6 +20,7 @@ Utilisation
     python devenir_docteurs.py --from 2010 --to 2020   # une période
     python devenir_docteurs.py --sample 500            # test rapide : 500 thèses par an
     python devenir_docteurs.py --offline               # aucune requête : recalcul depuis le cache
+    python devenir_docteurs.py --refresh               # re-télécharge tout le cache (automatique après 180 jours)
 
 Résultats (dossier --out, « resultats » par défaut)
     tableau_de_bord.html     tableau de bord complet, à ouvrir dans un navigateur
@@ -354,6 +355,41 @@ async def fetch_meta(oa, ids, f):
     finally:
         fh.close()
     return have
+
+
+def cache_freshness(P, cache, root):
+    """Rafraîchit tout le cache quand il est demandé (--refresh) ou trop vieux (--max-age).
+    Une mise à jour interrompue reprend là où elle s'est arrêtée au lancement suivant."""
+    f = cache / "_collecte.json"
+    info = json.loads(f.read_text()) if f.exists() else {}
+    if info.get("refresh_en_cours"):
+        if not P.offline:
+            log(f"Reprise de la mise à jour du cache commencée le {info['refresh_en_cours']}.")
+        return
+    last = datetime.date.fromisoformat(info["date"]) if info.get("date") else None
+    if last is None and (cache / "authors.jsonl").exists():
+        last = datetime.date.fromtimestamp((cache / "authors.jsonl").stat().st_mtime)
+    age = (datetime.date.today() - last).days if last else None
+    if P.offline:
+        if last and P.last_obs >= last.year:
+            log(f"Attention : le cache date du {last:%d/%m/%Y}. Les affiliations de {P.last_obs} y sont incomplètes ; "
+                f"relance sans --offline pour le mettre à jour, ou utilise --last-obs {last.year - 1}.")
+        return
+    if not (P.refresh or (age is not None and age > P.max_age)):
+        if age is not None:
+            log(f"Cache du {last:%d/%m/%Y} ({age} jours) réutilisé ; --refresh pour tout re-télécharger.")
+        return
+    why = "demandée (--refresh)" if P.refresh else f"cache vieux de {age} jours (> {P.max_age})"
+    log(f"Mise à jour complète du cache : {why}. Thèses, profils auteurs et métadonnées sont re-téléchargés.")
+    for g in cache.iterdir():
+        if g.is_file():
+            g.unlink()
+    (root / "theses_meta.jsonl").unlink(missing_ok=True)
+    f.write_text(json.dumps({"refresh_en_cours": datetime.date.today().isoformat()}))
+
+
+def mark_fresh(cache):
+    (cache / "_collecte.json").write_text(json.dumps({"date": datetime.date.today().isoformat()}))
 
 
 async def collect(P, cache, transport=None):
@@ -957,6 +993,8 @@ def parse(argv=None):
     g.add_argument("--concurrency", type=int, default=10)
     g.add_argument("--cache", default="cache_openalex")
     g.add_argument("--offline", action="store_true", help="aucune requête : uniquement le cache")
+    g.add_argument("--refresh", action="store_true", help="vide et re-télécharge tout le cache (thèses, profils, métadonnées)")
+    g.add_argument("--max-age", type=int, default=180, help="âge du cache (jours) au-delà duquel il est mis à jour automatiquement")
     g.add_argument("--no-meta", action="store_true", help="sans la collecte des métadonnées des thèses (pas de section « qui part »)")
     a = ap.add_argument_group("analyse")
     a.add_argument("--horizon", dest="horizons", type=int, nargs="+", default=[3, 5, 8])
@@ -999,6 +1037,7 @@ def main(argv=None, transport=None):
     cache.mkdir(parents=True, exist_ok=True)
     out = Path(P.out); out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
+    cache_freshness(P, cache, root)
     try:
         if P.offline:
             theses, authors, alias = load_cache(P, cache)
@@ -1007,6 +1046,7 @@ def main(argv=None, transport=None):
             if not P.key:
                 log("Attention : pas de clé API, quota anonyme très bas.")
             theses, authors, alias = asyncio.run(collect(P, cache, transport))
+            mark_fresh(cache)
     except ApiError as e:
         log(f"ERREUR : {e}")
         if e.status == 400:
