@@ -13,6 +13,7 @@ Il fait tout, dans l'ordre :
 
 Installation
     pip install httpx pandas openpyxl
+    pip install cryptography                  # seulement pour --login (tableau de bord protégé)
 
 Utilisation
     export OPENALEX_API_KEY=ta_cle            # Windows : set OPENALEX_API_KEY=ta_cle
@@ -20,6 +21,7 @@ Utilisation
     python devenir_docteurs.py --from 2010 --to 2020   # une période
     python devenir_docteurs.py --sample 500            # test rapide : 500 thèses par an
     python devenir_docteurs.py --offline               # aucune requête : recalcul depuis le cache
+    python devenir_docteurs.py --offline --login equipe   # tableau de bord protégé (mot de passe demandé)
     python devenir_docteurs.py --refresh               # re-télécharge tout le cache (automatique après 180 jours)
 
 Résultats (dossier --out, « resultats » par défaut)
@@ -941,7 +943,107 @@ def render_html(D, AR, PF, ET, P, ntheses, out_file, EX=None):
     doc = ('<!doctype html>\n<html lang="fr" data-fr-scheme="system">\n<head>\n<meta charset="utf-8">\n'
            '<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">\n'
            '<meta name="format-detection" content="telephone=no">\n' + head + '\n</head>\n<body>\n' + body + '\n</body>\n</html>\n')
+    if P.login:
+        doc = protect_html(doc, P.login, P.password, tokens["BLOC"])
+        log("  tableau de bord protégé par identifiant et mot de passe (contenu chiffré)")
     out_file.write_text(doc, encoding="utf-8")
+
+
+PBKDF2_ITER = 600_000
+
+
+def protect_html(doc, login, password, bloc=""):
+    """Chiffre toute la page (AES-256-GCM, clé dérivée de identifiant + mot de passe par PBKDF2-SHA256).
+    Ni l'identifiant ni le mot de passe ne figurent dans le fichier : seul le bon couple permet de déchiffrer."""
+    import base64, gzip, hashlib, secrets
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    except ImportError:
+        sys.exit("La protection par mot de passe demande le module cryptography : pip install cryptography")
+    salt, iv = secrets.token_bytes(16), secrets.token_bytes(12)
+    key = hashlib.pbkdf2_hmac("sha256", (login.strip() + "\n" + password).encode(), salt, PBKDF2_ITER, 32)
+    ct = AESGCM(key).encrypt(iv, gzip.compress(doc.encode("utf-8"), 9), None)
+    b64 = lambda b: base64.b64encode(b).decode()
+    return (LOGIN_PAGE.replace("@@BLOC@@", bloc).replace("@@ITER@@", str(PBKDF2_ITER))
+            .replace("@@SALT@@", b64(salt)).replace("@@IV@@", b64(iv)).replace("@@CT@@", b64(ct)))
+
+
+LOGIN_PAGE = r"""<!doctype html>
+<html lang="fr" data-fr-scheme="system">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+<meta name="robots" content="noindex">
+<title>Devenir des docteurs – Connexion</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.15.3/dist/dsfr.min.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@gouvfr/dsfr@1.15.3/dist/utility/icons/icons.min.css">
+<style>body{background:var(--background-default-grey)}.dd-login{max-width:28rem}</style>
+</head>
+<body>
+<header role="banner" class="fr-header">
+  <div class="fr-header__body"><div class="fr-container"><div class="fr-header__body-row">
+    <div class="fr-header__brand fr-enlarge-link">
+      @@BLOC@@
+      <div class="fr-header__service">
+        <p class="fr-header__service-title">Devenir des docteurs <span class="fr-badge fr-badge--sm fr-badge--green-menthe">BETA</span></p>
+        <p class="fr-header__service-tagline">Insertion et mobilité des docteurs formés en France, d'après OpenAlex</p>
+      </div>
+    </div>
+  </div></div></div>
+</header>
+<main id="main" class="fr-container fr-py-8w">
+  <div class="dd-login fr-mx-auto">
+    <h1 class="fr-h3">Connexion</h1>
+    <p class="fr-text--sm fr-text-mention--grey">Ce tableau de bord est à accès restreint.</p>
+    <form id="f" novalidate>
+      <div class="fr-input-group">
+        <label class="fr-label" for="u">Identifiant</label>
+        <input class="fr-input" id="u" name="username" autocomplete="username" required autofocus>
+      </div>
+      <div class="fr-password fr-input-group" id="pg">
+        <label class="fr-label" for="p">Mot de passe</label>
+        <div class="fr-input-wrap"><input class="fr-password__input fr-input" id="p" name="password" type="password" autocomplete="current-password" required></div>
+        <div class="fr-messages-group" id="pm" aria-live="polite"></div>
+        <div class="fr-password__checkbox fr-checkbox-group fr-checkbox-group--sm">
+          <input id="show" type="checkbox" aria-label="Afficher le mot de passe"><label class="fr-password__checkbox fr-label" for="show">Afficher</label>
+        </div>
+      </div>
+      <button class="fr-btn" id="go" type="submit">Se connecter</button>
+    </form>
+  </div>
+</main>
+<script>
+(function(){
+  var C = {salt:"@@SALT@@", iv:"@@IV@@", ct:"@@CT@@", iter:@@ITER@@};
+  var f=document.getElementById('f'), u=document.getElementById('u'), p=document.getElementById('p'),
+      pg=document.getElementById('pg'), pm=document.getElementById('pm'), go=document.getElementById('go');
+  document.getElementById('show').addEventListener('change', function(e){ p.type = e.target.checked ? 'text' : 'password'; });
+  function msg(t){ pg.classList.toggle('fr-input-group--error', !!t); p.classList.toggle('fr-input--error', !!t);
+    pm.innerHTML = t ? '<p class="fr-message fr-message--error">'+t+'</p>' : ''; }
+  function b64(s){ var b=atob(s), a=new Uint8Array(b.length); for(var i=0;i<b.length;i++) a[i]=b.charCodeAt(i); return a; }
+  if (!(window.crypto && crypto.subtle && window.DecompressionStream)) {
+    msg("Ce navigateur ne permet pas d'ouvrir la page protégée. Ouvre-la dans un navigateur récent, depuis le fichier ou une adresse en https.");
+    go.disabled = true;
+  }
+  f.addEventListener('submit', async function(e){
+    e.preventDefault(); msg(''); go.disabled = true; go.textContent = 'Vérification…';
+    try {
+      var enc = new TextEncoder();
+      var base = await crypto.subtle.importKey('raw', enc.encode(u.value.trim()+'\n'+p.value), 'PBKDF2', false, ['deriveKey']);
+      var key = await crypto.subtle.deriveKey({name:'PBKDF2', salt:b64(C.salt), iterations:C.iter, hash:'SHA-256'},
+                                              base, {name:'AES-GCM', length:256}, false, ['decrypt']);
+      var gz = await crypto.subtle.decrypt({name:'AES-GCM', iv:b64(C.iv)}, key, b64(C.ct));
+      var html = await new Response(new Blob([gz]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+      document.open(); document.write(html); document.close();
+    } catch (err) {
+      msg('Identifiant ou mot de passe incorrect.'); go.disabled = false; go.textContent = 'Se connecter'; p.select();
+    }
+  });
+})();
+</script>
+</body>
+</html>
+"""
 
 
 # ====================================================================== exports Excel
@@ -1016,6 +1118,8 @@ def parse(argv=None):
     a.add_argument("--out", default="resultats")
     a.add_argument("--explorer", choices=["visibles", "mobiles", "tous", "non"], default="visibles",
                    help="liste nominative de l'onglet Explorer : docteurs visibles après la thèse (défaut), seulement ceux passés par l'étranger, tous, ou aucune")
+    a.add_argument("--login", default=os.environ.get("DD_LOGIN", ""),
+                   help="protège le tableau de bord par identifiant et mot de passe (le mot de passe est demandé, ou lu dans DD_PASSWORD)")
     a.add_argument("--bloc-marque", default="", help="bloc-marque DSFR de l'en-tête, lignes séparées par | (ex. « Ministère|de l'Enseignement supérieur »)")
     P = ap.parse_args(argv)
     if P.y1 > P.y2:
@@ -1027,6 +1131,16 @@ def parse(argv=None):
     P.ar_h = max(P.horizons)
     P.pf_h = P.main_h
     P.early = min(P.early, P.ar_h - 1)
+    P.password = ""
+    if P.login:
+        P.password = os.environ.get("DD_PASSWORD", "")
+        if not P.password:
+            import getpass
+            P.password = getpass.getpass(f"Mot de passe du tableau de bord pour « {P.login} » : ")
+            if getpass.getpass("Confirme le mot de passe : ") != P.password:
+                sys.exit("Les deux mots de passe ne correspondent pas.")
+        if len(P.password) < 12:
+            log("Attention : mot de passe court. Avec 12 caractères ou plus, il est bien plus difficile à casser.")
     return P
 
 
