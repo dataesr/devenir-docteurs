@@ -1184,7 +1184,7 @@ TEMPLATE = r'''<title>Devenir des docteurs formés en France</title>
         <div class="fr-header__brand fr-enlarge-link">
           @@BLOC@@
           <div class="fr-header__service">
-            <a href="#main" title="Accueil – Devenir des docteurs"><p class="fr-header__service-title">Devenir des docteurs</p></a>
+            <a href="#main" title="Accueil – Devenir des docteurs"><p class="fr-header__service-title">Devenir des docteurs <span class="fr-badge fr-badge--sm fr-badge--green-menthe">BETA</span></p></a>
             <p class="fr-header__service-tagline">Insertion et mobilité des docteurs formés en France, d'après OpenAlex</p>
           </div>
         </div>
